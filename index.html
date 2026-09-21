@@ -1146,6 +1146,27 @@ function showAIOverlay(show,text){
   }
 }
 
+// ===== Image Compression =====
+function compressImage(base64Data,maxDim,quality){
+  return new Promise((resolve)=>{
+    const img=new Image();
+    img.onload=()=>{
+      let{width:w,height:h}=img;
+      if(w>maxDim||h>maxDim){
+        if(w>h){h=Math.round(h*maxDim/w);w=maxDim}
+        else{w=Math.round(w*maxDim/h);h=maxDim}
+      }
+      const canvas=document.createElement('canvas');
+      canvas.width=w;canvas.height=h;
+      const ctx=canvas.getContext('2d');
+      ctx.drawImage(img,0,0,w,h);
+      resolve(canvas.toDataURL('image/jpeg',quality));
+    };
+    img.onerror=()=>resolve(base64Data);
+    img.src=base64Data;
+  });
+}
+
 // ===== AI Image Analysis =====
 function buildAnalysisPrompt(extraPrompt){
   let prompt=`你是一个专业的小学教育分析助手，专门分析小学生的错题照片。请仔细识别照片中的题目内容、学生的作答和错误，返回JSON格式的分析结果。
@@ -1184,6 +1205,9 @@ async function analyzeImage(base64Image){
   showAIOverlay(true,'AI 识别中...');
   showAIStatus('AI 识别中...','loading');
 
+  // Compress image before sending
+  const compressedImage=await compressImage(base64Image,1280,0.7);
+
   const prompt=buildAnalysisPrompt(cfg.prompt);
 
   const body={
@@ -1192,7 +1216,7 @@ async function analyzeImage(base64Image){
       {role:'system',content:'你是小学教育分析助手，分析错题照片并返回JSON格式的结构化数据。只返回JSON，不要markdown代码块，不要其他文字。'},
       {role:'user',content:[
         {type:'text',text:prompt},
-        {type:'image_url',image_url:{url:base64Image}}
+        {type:'image_url',image_url:{url:compressedImage}}
       ]}
     ],
     temperature:0.3,
@@ -1217,7 +1241,8 @@ async function analyzeImage(base64Image){
     const data=await res.json();
     let content='';
     if(data.choices&&data.choices[0]){
-      content=data.choices[0].message.content;
+      const msg=data.choices[0].message;
+      content=msg.content||msg.reasoning_content||'';
     }else if(data.content){
       content=data.content;
     }else if(data.message){
@@ -1226,10 +1251,20 @@ async function analyzeImage(base64Image){
       content=JSON.stringify(data);
     }
 
+    if(!content||!content.trim()){
+      throw new Error('AI 返回了空内容，请检查模型名称是否正确');
+    }
+
     // Strip markdown code fences if present
     content=content.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
 
-    const result=JSON.parse(content);
+    // Extract JSON object from content (handles extra text before/after)
+    const jsonMatch=content.match(/\{[\s\S]*\}/);
+    if(!jsonMatch){
+      throw new Error('AI 返回格式异常：'+content.slice(0,100));
+    }
+
+    const result=JSON.parse(jsonMatch[0]);
 
     showAIOverlay(false);
     showAIStatus('AI 已识别，请确认后保存','success');
@@ -1283,7 +1318,8 @@ async function analyzeText(text){
     const data=await res.json();
     let content='';
     if(data.choices&&data.choices[0]){
-      content=data.choices[0].message.content;
+      const msg=data.choices[0].message;
+      content=msg.content||msg.reasoning_content||'';
     }else if(data.content){
       content=data.content;
     }else if(data.message){
@@ -1292,8 +1328,16 @@ async function analyzeText(text){
       content=JSON.stringify(data);
     }
 
+    if(!content||!content.trim()){
+      throw new Error('AI 返回了空内容，请检查模型名称是否正确');
+    }
+
     content=content.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
-    const result=JSON.parse(content);
+    const jsonMatch=content.match(/\{[\s\S]*\}/);
+    if(!jsonMatch){
+      throw new Error('AI 返回格式异常：'+content.slice(0,100));
+    }
+    const result=JSON.parse(jsonMatch[0]);
 
     showAIOverlay(false);
     showAIStatus('AI 已分析，请确认后保存','success');
