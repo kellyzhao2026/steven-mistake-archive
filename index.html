@@ -283,9 +283,38 @@ header{background:var(--card);border-bottom:1px solid var(--line);position:stick
 .preset-chip{padding:6px 12px;border:1px solid var(--line);border-radius:8px;font-size:12px;cursor:pointer;background:#fff;font-weight:600}
 .preset-chip:hover{border-color:var(--blue);color:var(--blue)}
 .preset-chip.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+/* Login Screen */
+.login-screen{position:fixed;inset:0;z-index:9999;background:linear-gradient(135deg,#2864ff 0%,#6b3fd4 100%);display:flex;align-items:center;justify-content:center;padding:20px}
+.login-card{background:#fff;border-radius:20px;padding:32px 28px;max-width:380px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+.login-card .logo-big{width:64px;height:64px;background:linear-gradient(135deg,var(--blue),var(--purple));border-radius:18px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:32px;font-weight:800;margin:0 auto 16px}
+.login-card h2{text-align:center;font-size:20px;margin:0 0 4px}
+.login-card .sub{text-align:center;color:var(--muted);font-size:13px;margin:0 0 24px}
+.login-card .field{margin-bottom:14px}
+.login-card .btn{width:100%;margin-top:6px}
+.login-toggle{text-align:center;font-size:13px;color:var(--muted);margin-top:16px}
+.login-toggle a{color:var(--blue);font-weight:700;cursor:pointer;text-decoration:none}
+.login-err{background:var(--red-bg);color:var(--red);border-radius:9px;padding:10px 12px;font-size:13px;margin-bottom:14px;display:none}
+.login-err.show{display:block}
+.login-loading{text-align:center;padding:20px;color:var(--blue);font-weight:600}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
+
+<!-- Login Screen -->
+<div class="login-screen" id="loginScreen" style="display:none">
+  <div class="login-card">
+    <div class="logo-big">S</div>
+    <h2 id="loginTitle">登录</h2>
+    <p class="sub" id="loginSub">Steven 错题档案 · 云端同步</p>
+    <div class="login-err" id="loginErr"></div>
+    <div class="field"><label>邮箱</label><input id="loginEmail" type="email" placeholder="parent@example.com" autocomplete="email"></div>
+    <div class="field"><label>密码</label><input id="loginPassword" type="password" placeholder="至少 6 位" autocomplete="current-password"></div>
+    <button class="btn primary" id="loginSubmit" style="font-size:15px;padding:12px">登录</button>
+    <div class="login-toggle" id="loginToggleText">还没有账号？<a id="loginToggle">立即注册</a></div>
+  </div>
+</div>
 
 <header>
   <div class="header-inner">
@@ -301,6 +330,7 @@ header{background:var(--card);border-bottom:1px solid var(--line);position:stick
       <button class="btn ghost sm" id="roleBtn" title="切换角色">切换为 Steven</button>
       <button class="btn ghost sm" id="exportBtn">导出</button>
       <button class="btn ghost sm" id="settingsBtn" title="AI 设置">⚙ AI设置</button>
+      <button class="btn ghost sm" id="logoutBtn" title="退出登录">退出</button>
     </div>
   </div>
 </header>
@@ -498,9 +528,97 @@ function daysUntil(targetDate){const t=new Date(fmtDate(targetDate));const n=new
 function daysAgo(dateStr){const d=new Date(dateStr);const n=new Date(fmtDate(today()));return Math.round((n-d)/86400000)}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6)}
 
-// ===== Persistence =====
-function loadData(){try{const d=localStorage.getItem(STORAGE_KEY);if(d){state.records=JSON.parse(d)}else{state.records=getDemoData();saveData()}}catch(e){state.records=[]}}
-function saveData(){localStorage.setItem(STORAGE_KEY,JSON.stringify(state.records))}
+// ===== Persistence (Supabase) =====
+const SUPABASE_URL='https://mfrbcvakpuiwiqguyjxz.supabase.co';
+const SUPABASE_KEY='sb_publishable_zb5wRXu0dDQL_Sn2CDoCkw_MOYcrWSj';
+const sbClient=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+
+function toDB(r,uid){
+  return{id:r.id,user_id:uid,image:r.image||'',subject:r.subject,reason:r.reason,careless_action:r.carelessAction||'',knowledge_point:r.knowledgePoint||'',question:r.question||'',answer:r.answer||'',plan:r.plan||'',status:r.status,review_history:r.reviewHistory||[],review_interval_idx:r.reviewIntervalIdx||0,next_review_date:r.nextReviewDate,repeats:r.repeats||0,created_at:r.createdAt};
+}
+function fromDB(row){
+  return{id:row.id,image:row.image||'',subject:row.subject,reason:row.reason,carelessAction:row.careless_action||'',knowledgePoint:row.knowledge_point||'',question:row.question||'',answer:row.answer||'',plan:row.plan||'',status:row.status,reviewHistory:row.review_history||[],reviewIntervalIdx:row.review_interval_idx||0,nextReviewDate:row.next_review_date,repeats:row.repeats||0,createdAt:row.created_at};
+}
+
+async function loadData(){
+  const{data:{user}}=await sbClient.auth.getUser();
+  if(!user){state.records=[];return}
+  const{data,error}=await sbClient.from('mistakes').select('*').eq('user_id',user.id);
+  if(error){console.error('Load error:',error);state.records=[];return}
+  state.records=data.map(fromDB);
+  if(state.records.length===0)state.records=getDemoData().map(r=>({...r}));
+}
+
+async function saveMistake(record){
+  const{data:{user}}=await sbClient.auth.getUser();
+  if(!user)return;
+  const row=toDB(record,user.id);
+  const{error}=await sbClient.from('mistakes').upsert(row);
+  if(error)console.error('Save error:',error);
+}
+
+async function deleteMistake(id){
+  const{error}=await sbClient.from('mistakes').delete().eq('id',id);
+  if(error)console.error('Delete error:',error);
+}
+
+// ===== Auth =====
+let isLoginMode=true;
+function showLoginScreen(){
+  $('#loginScreen').style.display='flex';
+  document.body.style.overflow='hidden';
+}
+function hideLoginScreen(){
+  $('#loginScreen').style.display='none';
+  document.body.style.overflow='';
+}
+function showLoginError(msg){
+  const el=$('#loginErr');
+  el.textContent=msg;
+  el.classList.add('show');
+}
+function setLoginLoading(loading){
+  const btn=$('#loginSubmit');
+  if(loading){btn.textContent='请稍候...';btn.disabled=true}
+  else{btn.textContent=isLoginMode?'登录':'注册';btn.disabled=false}
+}
+
+async function handleAuth(){
+  const email=$('#loginEmail').value.trim();
+  const password=$('#loginPassword').value.trim();
+  const err=$('#loginErr');
+  err.classList.remove('show');
+  if(!email||!password){showLoginError('请输入邮箱和密码');return}
+  if(password.length<6){showLoginError('密码至少 6 位');return}
+  setLoginLoading(true);
+  try{
+    if(isLoginMode){
+      const{data,error}=await sbClient.auth.signInWithPassword({email,password});
+      if(error)throw error;
+    }else{
+      const{data,error}=await sbClient.auth.signUp({email,password});
+      if(error)throw error;
+      if(data.user&&!data.session){
+        showLoginError('注册成功！请检查邮箱确认链接后登录。');
+        isLoginMode=true;
+        $('#loginTitle').textContent='登录';
+        $('#loginToggleText').innerHTML='还没有账号？<a id="loginToggle">立即注册</a>';
+        setLoginLoading(false);
+        return;
+      }
+    }
+  }catch(e){
+    showLoginError(e.message||'操作失败');
+    setLoginLoading(false);
+  }
+}
+
+async function handleLogout(){
+  await sbClient.auth.signOut();
+  state.records=[];
+  showLoginScreen();
+  renderTab();
+}
 
 // ===== Demo Data =====
 function getDemoData(){
@@ -989,7 +1107,7 @@ function saveRecord(){
 
   state.records.unshift(record);
   checkRepeatErrors(record);
-  saveData();
+  saveMistake(record);
   $('#recordModal').classList.remove('show');
   renderTab();
 }
@@ -1312,7 +1430,7 @@ function completeReview(id,correct){
   }
 
   checkRepeatErrors(r);
-  saveData();
+  saveMistake(r);
 
   // Show feedback + variation if correct
   const body=$('#reviewBody');
@@ -1398,7 +1516,7 @@ function showDetail(id){
 function deleteRecord(id){
   if(!confirm('确定删除这道错题？此操作不可撤销。'))return;
   state.records=state.records.filter(r=>r.id!==id);
-  saveData();
+  deleteMistake(id);
   renderTab();
 }
 
@@ -1470,7 +1588,24 @@ $('#tabBar').addEventListener('click',e=>{
 });
 $('#roleBtn').addEventListener('click',switchRole);
 $('#exportBtn').addEventListener('click',exportData);
+$('#logoutBtn').addEventListener('click',handleLogout);
 $('#fSubject').addEventListener('change',updateReasonOptions);
+
+// Login events
+$('#loginSubmit').addEventListener('click',handleAuth);
+$('#loginPassword').addEventListener('keydown',e=>{if(e.key==='Enter')handleAuth()});
+// Use event delegation for toggle since innerHTML replaces the element
+document.addEventListener('click',e=>{
+  if(e.target&&e.target.id==='loginToggle'){
+    isLoginMode=!isLoginMode;
+    $('#loginTitle').textContent=isLoginMode?'登录':'注册';
+    $('#loginSubmit').textContent=isLoginMode?'登录':'注册';
+    $('#loginToggleText').innerHTML=isLoginMode
+      ?'还没有账号？<a id="loginToggle">立即注册</a>'
+      :'已有账号？<a id="loginToggle">去登录</a>';
+    $('#loginErr').classList.remove('show');
+  }
+});
 $('#fReason').addEventListener('change',toggleCareless);
 
 // Click handler for upload area — use direct JS click instead of label to ensure mobile compatibility
@@ -1609,9 +1744,33 @@ document.addEventListener('touchmove',e=>{
     });
   }
 }
-loadData();
-updateReasonOptions();
-renderTab();
+
+// Auth: check session on load, set up state change listener
+sbClient.auth.onAuthStateChange((event,session)=>{
+  if(session){
+    hideLoginScreen();
+    loadData().then(()=>{
+      updateReasonOptions();
+      renderTab();
+    });
+  }else{
+    showLoginScreen();
+    renderTab();
+  }
+});
+
+// Also check existing session immediately
+(async()=>{
+  const{data:{session}}=await sbClient.auth.getSession();
+  if(session){
+    hideLoginScreen();
+    await loadData();
+  }else{
+    showLoginScreen();
+  }
+  updateReasonOptions();
+  renderTab();
+})();
 </script>
 </body>
 </html>
