@@ -1578,14 +1578,10 @@ $$('.sheet').forEach(sheet=>{
   },{passive:true});
 });
 
-// Prevent double-tap zoom on buttons
-document.addEventListener('touchend',e=>{
-  if(e.target.closest('.btn,.tab,.filter-btn,.choice-btn,.preset-chip')){
-    e.preventDefault();
-  }
-},{passive:false});
+// NOTE: Do NOT preventDefault on touchend — it blocks click events on mobile.
+// Double-tap zoom is already prevented via CSS touch-action:manipulation on buttons.
 
-// Prevent iOS rubber-band scroll on backdrop
+// Prevent iOS rubber-band scroll on backdrop only (not inside sheet)
 document.addEventListener('touchmove',e=>{
   if(e.target.closest('.modal')&&!e.target.closest('.sheet')){
     e.preventDefault();
