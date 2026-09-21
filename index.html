@@ -540,21 +540,52 @@ function fromDB(row){
   return{id:row.id,image:row.image||'',subject:row.subject,reason:row.reason,carelessAction:row.careless_action||'',knowledgePoint:row.knowledge_point||'',question:row.question||'',answer:row.answer||'',plan:row.plan||'',status:row.status,reviewHistory:row.review_history||[],reviewIntervalIdx:row.review_interval_idx||0,nextReviewDate:row.next_review_date,repeats:row.repeats||0,createdAt:row.created_at};
 }
 
-async function loadData(){
+const CACHE_KEY='steven-cache';
+
+async function loadData(options){
+  const opts=options||{};
   try{
     const{data:{user}}=await sbClient.auth.getUser();
     if(!user){state.records=[];return false}
+
+    // Step 1: load from cache first for instant display
+    if(!opts.skipCache){
+      try{
+        const cached=localStorage.getItem(CACHE_KEY+'-'+user.id);
+        if(cached){
+          const arr=JSON.parse(cached);
+          if(Array.isArray(arr)&&arr.length>0){
+            state.records=arr.map(fromDB);
+            // Render immediately with cache, then continue to refresh
+            updateReasonOptions();
+            renderTab();
+          }
+        }
+      }catch(e){/* ignore cache errors */}
+    }
+
+    // Step 2: fetch from Supabase
     const{data,error}=await sbClient.from('mistakes').select('*').eq('user_id',user.id).order('created_at',{ascending:false});
-    if(error){console.error('Load error:',error);state.records=[];return false}
+    if(error){console.error('Load error:',error);return false}
     state.records=data.map(fromDB);
+
     // Only show demo data if user has zero records AND has never saved anything
     if(state.records.length===0&&!localStorage.getItem('steven-has-data')){
       state.records=getDemoData().map(r=>({...r}));
     }
+
+    // Save to cache
+    try{
+      localStorage.setItem(CACHE_KEY+'-'+user.id,JSON.stringify(data));
+    }catch(e){/* ignore */}
+
     return true;
   }catch(e){
     console.error('loadData exception:',e);
-    state.records=[];
+    // If we have cache, keep showing it; otherwise empty
+    if(!state.records||state.records.length===0){
+      state.records=[];
+    }
     return false;
   }
 }
@@ -565,11 +596,31 @@ async function saveMistake(record){
   const row=toDB(record,user.id);
   const{error}=await sbClient.from('mistakes').upsert(row);
   if(error)console.error('Save error:',error);
+  // Update cache after save
+  try{
+    const cached=localStorage.getItem(CACHE_KEY+'-'+user.id);
+    let arr=cached?JSON.parse(cached):[];
+    const idx=arr.findIndex(r=>r.id===record.id);
+    if(idx>=0)arr[idx]=row; else arr.unshift(row);
+    localStorage.setItem(CACHE_KEY+'-'+user.id,JSON.stringify(arr));
+  }catch(e){}
 }
 
 async function deleteMistake(id){
+  const{data:{user}}=await sbClient.auth.getUser();
   const{error}=await sbClient.from('mistakes').delete().eq('id',id);
   if(error)console.error('Delete error:',error);
+  // Update cache after delete
+  if(user){
+    try{
+      const cached=localStorage.getItem(CACHE_KEY+'-'+user.id);
+      if(cached){
+        let arr=JSON.parse(cached);
+        arr=arr.filter(r=>r.id!==id);
+        localStorage.setItem(CACHE_KEY+'-'+user.id,JSON.stringify(arr));
+      }
+    }catch(e){}
+  }
 }
 
 // ===== Auth =====
@@ -603,13 +654,9 @@ async function handleAuth(){
   setLoginLoading(true);
   try{
     if(isLoginMode){
-      const{data,error}=await sbClient.auth.signInWithPassword({email,password});
+      const{error}=await sbClient.auth.signInWithPassword({email,password});
       if(error)throw error;
-      // Explicitly load data after login (in addition to onAuthStateChange)
-      const ok=await loadData();
-      hideLoginScreen();
-      updateReasonOptions();
-      renderTab();
+      // onAuthStateChange will handle loading data and hiding login screen
     }else{
       const{data,error}=await sbClient.auth.signUp({email,password});
       if(error)throw error;
@@ -619,15 +666,8 @@ async function handleAuth(){
         $('#loginTitle').textContent='登录';
         $('#loginToggleText').innerHTML='还没有账号？<a id="loginToggle">立即注册</a>';
         setLoginLoading(false);
-        return;
       }
-      // Auto sign-in after successful signup with session
-      if(data.session){
-        await loadData();
-        hideLoginScreen();
-        updateReasonOptions();
-        renderTab();
-      }
+      // If session exists, onAuthStateChange will handle everything
     }
   }catch(e){
     showLoginError(e.message||'操作失败');
@@ -1191,8 +1231,8 @@ function compressImage(base64Data,maxDim,quality){
 }
 
 // ===== AI Image Analysis =====
-// Strategy: Ask AI to describe in natural language, then parse Chinese text.
-// This avoids JSON format issues with various AI models.
+// Strategy: ask AI for structured labelled text, parse by labels.
+// temperature=0 for deterministic output.
 
 const MATH_REASONS=['读题不完整','数量关系没找出','知识点不会','方法不会','计算错误','单位/格式错误','检查不到位','具体动作粗心'];
 const CHINESE_REASONS=['字音字形','词语理解','病句标点','段落概括','阅读理解','信息提取','人物情感分析','作文审题','作文结构','表达不完整'];
@@ -1200,113 +1240,149 @@ const ENGLISH_REASONS=['单词不会','拼写错误','词义混淆','语法不�
 const ALL_REASONS=[...MATH_REASONS,...CHINESE_REASONS,...ENGLISH_REASONS];
 
 function buildImagePrompt(){
-  return `请看这张小学错题照片，用中文描述以下内容（每项一行）：
-1. 学科（数学/语文/英语）
-2. 题目是什么
-3. 学生怎么答的
-4. 正确答案是什么
-5. 错在哪里
-6. 涉及什么知识点
-7. 建议怎么改进`;
+  return `你是小学错题分析专家。请仔细看这张错题照片，按以下格式输出分析结果。每个字段占一行，前面是标签，后面是内容。
+
+【输出格式】
+学科：数学
+题目：完整的题目原文
+学生作答：学生写的答案和解题过程
+正确答案：最终答案
+解答过程：正确的解题步骤
+错因：从下面的列表中选一个最匹配的
+粗心具体动作：如果错因是"具体动作粗心"，填具体动作；否则填"无"
+知识点：写出该题对应的知识点和所属年级（如：四年级上册-三位数乘两位数）
+改进措施：给出针对性的改进建议（2-3句话）
+
+【数学错因列表】读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
+【语文错因列表】字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
+【英语错因列表】单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
+
+请严格按上面的格式输出，标签名不要改，每行一个字段。`;
 }
 
 function buildTextPrompt(text){
-  return `以下是家长输入的一道错题：
+  return `你是小学错题分析专家。以下是家长输入的一道错题：
+
 ${text}
 
-请用中文描述以下内容（每项一行）：
-1. 学科（数学/语文/英语）
-2. 题目是什么
-3. 学生怎么答的
-4. 正确答案是什么
-5. 错在哪里
-6. 涉及什么知识点
-7. 建议怎么改进`;
+请按以下格式输出分析结果。每个字段占一行，前面是标签，后面是内容。
+
+【输出格式】
+学科：数学
+题目：完整的题目原文
+学生作答：学生写的答案和解题过程
+正确答案：最终答案
+解答过程：正确的解题步骤
+错因：从下面的列表中选一个最匹配的
+粗心具体动作：如果错因是"具体动作粗心"，填具体动作；否则填"无"
+知识点：写出该题对应的知识点和所属年级（如：四年级上册-三位数乘两位数）
+改进措施：给出针对性的改进建议（2-3句话）
+
+【数学错因列表】读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
+【语文错因列表】字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
+【英语错因列表】单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
+
+请严格按上面的格式输出，标签名不要改，每行一个字段。`;
 }
 
-// Parse natural language AI response into structured data
+// Parse AI response by label lines (stable format)
 function parseAIResponse(text){
   if(!text||!text.trim())return null;
 
-  // First try: maybe it IS json
+  // Try JSON first
   const m=text.match(/\{[\s\S]*\}/);
   if(m){
     try{
       const obj=JSON.parse(m[0]);
-      if(obj.subject||obj.reason||obj.question)return obj;
+      if(obj.subject||obj.reason||obj.question)return normalizeAIResult(obj);
     }catch(e){}
   }
 
-  // Second try: parse natural language Chinese text
-  const result={subject:'',reason:'',carelessAction:'',knowledgePoint:'',question:'',answer:'',plan:''};
-
-  // Detect subject
-  if(/数学|计算|加减乘除|分数|小数|几何|面积|体积|乘法|除法|加法|减法|方程|图形|角|周长/.test(text))result.subject='数学';
-  else if(/语文|阅读|作文|词语|拼音|汉字|段落|修辞|标点|病句/.test(text))result.subject='语文';
-  else if(/英语|单词|语法|拼写|过去式|时态|句型/.test(text))result.subject='英语';
-
-  // Try to detect subject from explicit mention
-  const subMatch=text.match(/学科[：:]\s*(数学|语文|英语)/);
-  if(subMatch)result.subject=subMatch[1];
-
-  // Detect reason from ALL_REASONS
-  for(const r of ALL_REASONS){
-    if(text.includes(r)){result.reason=r;break}
-  }
-  // Fallback reason detection
-  if(!result.reason){
-    if(/计算.{0,4}错|算错|进位.{0,4}错|忘记进位|加错|减错|乘错|除错/.test(text))result.reason='计算错误';
-    else if(/读题|审题|没看清|看错/.test(text))result.reason='读题不完整';
-    else if(/粗心|抄错|写错|抄错|看错数字/.test(text))result.reason='具体动作粗心';
-    else if(/拼写/.test(text))result.reason='拼写错误';
-    else if(result.subject==='数学')result.reason='知识点不会';
-    else if(result.subject==='语文')result.reason='阅读理解';
-    else if(result.subject==='英语')result.reason='单词不会';
+  // Parse by labelled lines
+  function get(label){
+    const re=new RegExp(label+'[：:]\\s*([^\\n]+)','i');
+    const match=text.match(re);
+    return match?match[1].trim():'';
   }
 
-  // Extract carelessAction if reason is careless
-  if(result.reason.includes('粗心')){
-    const cm=text.match(/(?:粗心|抄错|写错|看错)[：:，,]?\s*([^。\n]+)/);
-    if(cm)result.carelessAction=cm[1].trim().slice(0,100);
+  let subject=get('学科');
+  if(!['数学','语文','英语'].includes(subject)){
+    // fallback detect
+    if(/数学|计算|加减乘除|分数|小数|几何|面积|体积|乘法|除法|方程|图形|角|周长|面积|体积|应用题/.test(text))subject='数学';
+    else if(/语文|阅读|作文|词语|拼音|汉字|段落|修辞|标点|病句/.test(text))subject='语文';
+    else if(/英语|单词|语法|拼写|过去式|时态|句型/.test(text))subject='英语';
   }
 
-  // Extract knowledge point
-  const kpMatch=text.match(/知识点[：:]\s*([^。\n]+)/);
-  if(kpMatch)result.knowledgePoint=kpMatch[1].trim().slice(0,50);
-  else{
-    // Try to find common math topics
-    const topics=['三位数乘两位数','两位数乘法','除法','分数','小数','面积','周长','方程','图形','角','百分数','比例','倍数','因数','质数','合数'];
-    for(const t of topics){
-      if(text.includes(t)){result.knowledgePoint=t;break}
+  let reason=get('错因');
+  // Validate reason is from list, find best match
+  if(!ALL_REASONS.includes(reason)){
+    let best='';
+    for(const r of ALL_REASONS){
+      if(text.includes(r)){best=r;break}
+    }
+    if(best)reason=best;
+    else{
+      // fallback by keywords
+      if(/计算.{0,4}错|算错|进位.{0,4}错|忘记进位|加错|减错|乘错|除错/.test(text))reason='计算错误';
+      else if(/读题|审题|没看清|看错/.test(text))reason='读题不完整';
+      else if(/粗心|抄错|写错|抄错|看错数字/.test(text))reason='具体动作粗心';
+      else if(/拼写/.test(text))reason='拼写错误';
+      else if(subject==='数学')reason='知识点不会';
+      else if(subject==='语文')reason='阅读理解';
+      else if(subject==='英语')reason='单词不会';
     }
   }
 
-  // Extract question (题目)
-  const qMatch=text.match(/(?:题目|题|原题)[是什么：:]\s*([^。\n]+)/);
-  if(qMatch)result.question=qMatch[1].trim().slice(0,300);
-  else{
-    // Use the raw text up to 300 chars as question
-    result.question=text.slice(0,300);
+  let question=get('题目');
+  const stuAns=get('学生作答');
+  if(stuAns&&stuAns!=='无'&&!question.includes(stuAns)){
+    question+='\n学生作答：'+stuAns;
   }
 
-  // Extract student answer
-  const saMatch=text.match(/(?:学生|作答|答案|答)[：:是]?\s*([^。\n]+)/);
-  if(saMatch&&!result.question.includes(saMatch[1])){
-    result.question+=' 学生作答：'+saMatch[1].trim().slice(0,100);
+  let answer=get('正确答案');
+  const solution=get('解答过程');
+  if(solution&&solution!=='无'){
+    answer=answer+'\n\n解答过程：\n'+solution;
   }
 
-  // Extract correct answer
-  const ansMatch=text.match(/(?:正确答案|正确解法|正确|答案)[：:是]?\s*([^。\n]+)/);
-  if(ansMatch)result.answer=ansMatch[1].trim().slice(0,200);
+  let knowledgePoint=get('知识点');
+  if(!knowledgePoint){
+    const topics=['三位数乘两位数','两位数乘法','除数是两位数的除法','分数的初步认识','小数的初步认识','面积','周长','长方形和正方形','角的度量','平行四边形','三位数加减法','表内除法','表内乘法','有余数的除法','万以内数的认识','克和千克','图形的运动','混合运算','因数与倍数','质数与合数','分数的意义','分数加减法','方程','百分数','比例','圆柱与圆锥'];
+    for(const t of topics){
+      if(text.includes(t)){knowledgePoint=t;break}
+    }
+  }
 
-  // Extract improvement plan
-  const planMatch=text.match(/(?:建议|改进|措施|怎么改)[：:？]?\s*([^。\n]+)/);
-  if(planMatch)result.plan=planMatch[1].trim().slice(0,100);
-  else result.plan='先订正，3天后做变式题';
+  let plan=get('改进措施');
+  if(!plan)plan='先独立订正，3天后做变式题巩固。';
 
-  // Only return if we found something meaningful
-  if(!result.subject&&!result.reason&&!result.question)return null;
-  return result;
+  let carelessAction=get('粗心具体动作');
+  if(carelessAction==='无'||!reason.includes('粗心'))carelessAction='';
+
+  if(!subject&&!reason&&!question)return null;
+
+  return {
+    subject:subject,
+    reason:reason,
+    carelessAction:carelessAction,
+    knowledgePoint:knowledgePoint.slice(0,50),
+    question:question.slice(0,500),
+    answer:answer.slice(0,500),
+    plan:plan.slice(0,200)
+  };
+}
+
+// Normalize JSON response keys to our format
+function normalizeAIResult(obj){
+  return{
+    subject:obj.subject||obj.学科||'',
+    reason:obj.reason||obj.错因||'',
+    carelessAction:obj.carelessAction||obj.careless_action||obj.粗心具体动作||'',
+    knowledgePoint:obj.knowledgePoint||obj.knowledge_point||obj.知识点||'',
+    question:obj.question||obj.题目||'',
+    answer:obj.answer||obj.正确答案||'',
+    plan:obj.plan||obj.改进措施||''
+  };
 }
 
 async function analyzeImage(base64Image){
@@ -1325,14 +1401,15 @@ async function analyzeImage(base64Image){
   const body={
     model:cfg.model||'gpt-4o',
     messages:[
-      {role:'system',content:'你是小学教育助手。请用中文描述照片中的错题内容。'},
+      {role:'system',content:'你是专业的小学错题分析专家。请严格按照用户要求的标签格式输出，每个标签一行，标签名保持不变。不要输出思考过程。'},
       {role:'user',content:[
         {type:'text',text:prompt},
         {type:'image_url',image_url:{url:compressedImage}}
       ]}
     ],
-    temperature:0.3,
-    max_tokens:600
+    temperature:0,
+    top_p:0.001,
+    max_tokens:800
   };
 
   try{
@@ -1393,11 +1470,12 @@ async function analyzeText(text){
   const body={
     model:cfg.model||'deepseek-flash',
     messages:[
-      {role:'system',content:'你是小学教育助手。请用中文描述题目内容和错误分析。'},
+      {role:'system',content:'你是专业的小学错题分析专家。请严格按照用户要求的标签格式输出，每个标签一行，标签名保持不变。不要输出思考过程。'},
       {role:'user',content:prompt}
     ],
-    temperature:0.3,
-    max_tokens:600
+    temperature:0,
+    top_p:0.001,
+    max_tokens:800
   };
 
   try{
