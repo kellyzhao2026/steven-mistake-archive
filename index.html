@@ -1210,7 +1210,7 @@ async function analyzeImage(base64Image){
   const body={
     model:cfg.model||'gpt-4o',
     messages:[
-      {role:'system',content:'你是一个JSON生成器。用户会给你一张错题照片和分析要求，你必须直接输出JSON对象，不要输出任何思考过程、解释、markdown或其他文字。第一个字符必须是{。'},
+      {role:'system',content:'输出JSON，不输出任何其他文字。'},
       {role:'user',content:[
         {type:'text',text:prompt},
         {type:'image_url',image_url:{url:compressedImage}}
@@ -1274,6 +1274,13 @@ async function analyzeImage(base64Image){
     try{
       result=JSON.parse(jsonMatch[0]);
     }catch(e2){
+      // Fallback: try to extract useful info from text response
+      const fallback=extractFromText(content);
+      if(fallback){
+        showAIOverlay(false);
+        showAIStatus('AI 已识别（文本模式），请确认后保存','success');
+        return fallback;
+      }
       throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
     }
 
@@ -1286,6 +1293,39 @@ async function analyzeImage(base64Image){
     showAIStatus('AI 识别失败：'+e.message+'。可手动填写，或检查 AI 设置。','error');
     return null;
   }
+}
+
+// ===== Fallback: extract info from text response =====
+function extractFromText(text){
+  if(!text||!text.trim())return null;
+  // Try to find JSON embedded in text
+  const m=text.match(/\{[\s\S]*\}/);
+  if(m){
+    try{return JSON.parse(m[0])}catch(e){}
+  }
+  // Build a minimal result from text
+  const result={
+    subject:'',
+    reason:'',
+    carelessAction:'',
+    knowledgePoint:'',
+    question:text.slice(0,500),
+    answer:'',
+    plan:''
+  };
+  // Detect subject
+  if(/数学|计算|加减乘除|分数|小数|几何|面积|体积/.test(text))result.subject='数学';
+  else if(/语文|阅读|作文|词语|拼音|汉字/.test(text))result.subject='语文';
+  else if(/英语|单词|语法|拼写|过去式/.test(text))result.subject='英语';
+  // Detect error reasons
+  if(/计算错误|算错|进位/.test(text))result.reason='计算错误';
+  else if(/读题|审题|没看清/.test(text))result.reason='读题不完整';
+  else if(/粗心|抄错|写错/.test(text))result.reason='具体动作粗心';
+  else if(/拼写/.test(text))result.reason='拼写错误';
+  else result.reason='知识点不会';
+  // Only return if we found a subject
+  if(!result.subject)return null;
+  return result;
 }
 
 // ===== AI Text Analysis (for text-only models like DeepSeek) =====
@@ -1361,6 +1401,12 @@ async function analyzeText(text){
     try{
       result=JSON.parse(jsonMatch[0]);
     }catch(e2){
+      const fallback=extractFromText(content);
+      if(fallback){
+        showAIOverlay(false);
+        showAIStatus('AI 已分析（文本模式），请确认后保存','success');
+        return fallback;
+      }
       throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
     }
 
