@@ -1608,12 +1608,10 @@ document.addEventListener('click',e=>{
 });
 $('#fReason').addEventListener('change',toggleCareless);
 
-// Click handler for upload area — use direct JS click instead of label to ensure mobile compatibility
+// Click handler for upload area — direct JS click for mobile compatibility
 $('#uploadArea').addEventListener('click',()=>{
   $('#photoInput').click();
 });
-// Prevent the click from firing twice (label + handler)
-$('#uploadLabel').addEventListener('click',e=>e.preventDefault());
 
 $('#photoInput').addEventListener('change',e=>{
   const f=e.target.files[0];
@@ -1626,8 +1624,17 @@ $('#photoInput').addEventListener('change',e=>{
     // If vision model, auto-trigger AI image analysis
     const cfg=loadAIConfig();
     if(cfg.endpoint&&isVisionModel(cfg.model)){
-      const result=await analyzeImage(pendingImage);
-      if(result)autoFillForm(result);
+      try{
+        const result=await analyzeImage(pendingImage);
+        if(result)autoFillForm(result);
+      }catch(err){
+        showAIOverlay(false);
+        showAIStatus('AI 识别失败：'+(err.message||'未知错误')+'。可手动填写，或检查 AI 设置。','error');
+      }
+    }else if(!cfg.endpoint){
+      showAIStatus('未配置 AI 接口。点击右上角「AI设置」配置后即可自动识别。','error');
+    }else{
+      showAIStatus('当前模型（'+(cfg.model||'')+'）不支持图片识别。请在下方文字框输入题目，点击 AI 分析。','loading');
     }
   };
   rd.readAsDataURL(f);
@@ -1637,8 +1644,12 @@ $('#saveRecord').addEventListener('click',saveRecord);
 $('#textAnalyzeBtn').addEventListener('click',async()=>{
   const text=$('#fTextInput').value.trim();
   if(!text){alert('请先输入题目和作答内容');return}
-  const result=await analyzeText(text);
-  if(result)autoFillForm(result);
+  try{
+    const result=await analyzeText(text);
+    if(result)autoFillForm(result);
+  }catch(err){
+    showAIStatus('AI 分析失败：'+(err.message||'未知错误'),'error');
+  }
 });
 
 // Settings modal
