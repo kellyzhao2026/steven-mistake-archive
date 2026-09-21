@@ -1168,26 +1168,122 @@ function compressImage(base64Data,maxDim,quality){
 }
 
 // ===== AI Image Analysis =====
-function buildAnalysisPrompt(extraPrompt){
-  let prompt=`看照片，输出JSON。只填以下字段，不要推理过程，不要解释。
+// Strategy: Ask AI to describe in natural language, then parse Chinese text.
+// This avoids JSON format issues with various AI models.
 
-subject: "数学"或"语文"或"英语"
-reason: 从对应学科列表中选一个
-carelessAction: 仅"粗心"类错因填具体动作，否则空
-knowledgePoint: 知识点（5-10个字）
-question: 题目原文+学生作答（简洁，不要分析过程）
-answer: 正确答案
-plan: 一句话改进措施
+const MATH_REASONS=['读题不完整','数量关系没找出','知识点不会','方法不会','计算错误','单位/格式错误','检查不到位','具体动作粗心'];
+const CHINESE_REASONS=['字音字形','词语理解','病句标点','段落概括','阅读理解','信息提取','人物情感分析','作文审题','作文结构','表达不完整'];
+const ENGLISH_REASONS=['单词不会','拼写错误','词义混淆','语法不会','句型不会','听写错误','阅读理解','书写格式','审题错误'];
+const ALL_REASONS=[...MATH_REASONS,...CHINESE_REASONS,...ENGLISH_REASONS];
 
-数学: 读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
-语文: 字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
-英语: 单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
+function buildImagePrompt(){
+  return `请看这张小学错题照片，用中文描述以下内容（每项一行）：
+1. 学科（数学/语文/英语）
+2. 题目是什么
+3. 学生怎么答的
+4. 正确答案是什么
+5. 错在哪里
+6. 涉及什么知识点
+7. 建议怎么改进`;
+}
 
-{"subject":"数学","reason":"计算错误","carelessAction":"","knowledgePoint":"三位数乘两位数","question":"题目：345×12=？ 学生作答：4140","answer":"4140","plan":"先订正，3天后做变式题"}`;
-  if(extraPrompt&&extraPrompt.trim()){
-    prompt+='\n\n'+extraPrompt.trim();
+function buildTextPrompt(text){
+  return `以下是家长输入的一道错题：
+${text}
+
+请用中文描述以下内容（每项一行）：
+1. 学科（数学/语文/英语）
+2. 题目是什么
+3. 学生怎么答的
+4. 正确答案是什么
+5. 错在哪里
+6. 涉及什么知识点
+7. 建议怎么改进`;
+}
+
+// Parse natural language AI response into structured data
+function parseAIResponse(text){
+  if(!text||!text.trim())return null;
+
+  // First try: maybe it IS json
+  const m=text.match(/\{[\s\S]*\}/);
+  if(m){
+    try{
+      const obj=JSON.parse(m[0]);
+      if(obj.subject||obj.reason||obj.question)return obj;
+    }catch(e){}
   }
-  return prompt;
+
+  // Second try: parse natural language Chinese text
+  const result={subject:'',reason:'',carelessAction:'',knowledgePoint:'',question:'',answer:'',plan:''};
+
+  // Detect subject
+  if(/数学|计算|加减乘除|分数|小数|几何|面积|体积|乘法|除法|加法|减法|方程|图形|角|周长/.test(text))result.subject='数学';
+  else if(/语文|阅读|作文|词语|拼音|汉字|段落|修辞|标点|病句/.test(text))result.subject='语文';
+  else if(/英语|单词|语法|拼写|过去式|时态|句型/.test(text))result.subject='英语';
+
+  // Try to detect subject from explicit mention
+  const subMatch=text.match(/学科[：:]\s*(数学|语文|英语)/);
+  if(subMatch)result.subject=subMatch[1];
+
+  // Detect reason from ALL_REASONS
+  for(const r of ALL_REASONS){
+    if(text.includes(r)){result.reason=r;break}
+  }
+  // Fallback reason detection
+  if(!result.reason){
+    if(/计算.{0,4}错|算错|进位.{0,4}错|忘记进位|加错|减错|乘错|除错/.test(text))result.reason='计算错误';
+    else if(/读题|审题|没看清|看错/.test(text))result.reason='读题不完整';
+    else if(/粗心|抄错|写错|抄错|看错数字/.test(text))result.reason='具体动作粗心';
+    else if(/拼写/.test(text))result.reason='拼写错误';
+    else if(result.subject==='数学')result.reason='知识点不会';
+    else if(result.subject==='语文')result.reason='阅读理解';
+    else if(result.subject==='英语')result.reason='单词不会';
+  }
+
+  // Extract carelessAction if reason is careless
+  if(result.reason.includes('粗心')){
+    const cm=text.match(/(?:粗心|抄错|写错|看错)[：:，,]?\s*([^。\n]+)/);
+    if(cm)result.carelessAction=cm[1].trim().slice(0,100);
+  }
+
+  // Extract knowledge point
+  const kpMatch=text.match(/知识点[：:]\s*([^。\n]+)/);
+  if(kpMatch)result.knowledgePoint=kpMatch[1].trim().slice(0,50);
+  else{
+    // Try to find common math topics
+    const topics=['三位数乘两位数','两位数乘法','除法','分数','小数','面积','周长','方程','图形','角','百分数','比例','倍数','因数','质数','合数'];
+    for(const t of topics){
+      if(text.includes(t)){result.knowledgePoint=t;break}
+    }
+  }
+
+  // Extract question (题目)
+  const qMatch=text.match(/(?:题目|题|原题)[是什么：:]\s*([^。\n]+)/);
+  if(qMatch)result.question=qMatch[1].trim().slice(0,300);
+  else{
+    // Use the raw text up to 300 chars as question
+    result.question=text.slice(0,300);
+  }
+
+  // Extract student answer
+  const saMatch=text.match(/(?:学生|作答|答案|答)[：:是]?\s*([^。\n]+)/);
+  if(saMatch&&!result.question.includes(saMatch[1])){
+    result.question+=' 学生作答：'+saMatch[1].trim().slice(0,100);
+  }
+
+  // Extract correct answer
+  const ansMatch=text.match(/(?:正确答案|正确解法|正确|答案)[：:是]?\s*([^。\n]+)/);
+  if(ansMatch)result.answer=ansMatch[1].trim().slice(0,200);
+
+  // Extract improvement plan
+  const planMatch=text.match(/(?:建议|改进|措施|怎么改)[：:？]?\s*([^。\n]+)/);
+  if(planMatch)result.plan=planMatch[1].trim().slice(0,100);
+  else result.plan='先订正，3天后做变式题';
+
+  // Only return if we found something meaningful
+  if(!result.subject&&!result.reason&&!result.question)return null;
+  return result;
 }
 
 async function analyzeImage(base64Image){
@@ -1200,133 +1296,65 @@ async function analyzeImage(base64Image){
   showAIOverlay(true,'AI 识别中...');
   showAIStatus('AI 识别中...','loading');
 
-  // Compress image before sending
   const compressedImage=await compressImage(base64Image,1280,0.7);
-
-  const prompt=buildAnalysisPrompt(cfg.prompt);
+  const prompt=buildImagePrompt()+(cfg.prompt?'\n\n'+cfg.prompt:'');
 
   const body={
     model:cfg.model||'gpt-4o',
     messages:[
-      {role:'system',content:'输出JSON，不输出任何其他文字。'},
+      {role:'system',content:'你是小学教育助手。请用中文描述照片中的错题内容。'},
       {role:'user',content:[
         {type:'text',text:prompt},
         {type:'image_url',image_url:{url:compressedImage}}
       ]}
     ],
-    temperature:0.1,
-    max_tokens:800,
-    response_format:{type:'json_object'}
+    temperature:0.3,
+    max_tokens:600
   };
 
   try{
     const headers={'Content-Type':'application/json'};
     if(cfg.apiKey)headers['Authorization']='Bearer '+cfg.apiKey;
 
-    const res=await fetch(cfg.endpoint,{
-      method:'POST',
-      headers,
-      body:JSON.stringify(body)
-    });
+    const res=await fetch(cfg.endpoint,{method:'POST',headers,body:JSON.stringify(body)});
 
     if(!res.ok){
       const errText=await res.text().catch(()=>'');
       throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,300):''));
     }
 
+    const rawText=await res.text();
     let data;
-    try{
-      const rawText=await res.text();
-      data=JSON.parse(rawText);
-    }catch(jsonErr){
-      throw new Error('API返回格式异常（模型可能不存在）。错误：'+jsonErr.message);
-    }
+    try{data=JSON.parse(rawText)}catch(e){throw new Error('API返回格式异常（模型可能不存在）')}
+
     let content='';
     if(data.choices&&data.choices[0]){
       const msg=data.choices[0].message;
       content=msg.content||msg.reasoning_content||'';
     }else if(data.error){
-      throw new Error('API错误：'+(data.error.message||data.error.type||JSON.stringify(data.error)).slice(0,200));
-    }else if(data.content){
-      content=data.content;
-    }else if(data.message){
-      content=data.message;
+      throw new Error('API错误：'+(data.error.message||JSON.stringify(data.error)).slice(0,200));
     }else{
       content=JSON.stringify(data);
     }
 
     if(!content||!content.trim()){
-      throw new Error('AI 返回了空内容。模型"'+(cfg.model||'')+'"可能不支持图片输入，请换用通义千问 VL 或 GPT-4o');
+      throw new Error('AI 返回空内容，模型"'+(cfg.model||'')+'"可能不支持图片输入');
     }
 
-    // Strip markdown code fences if present
-    content=content.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
-
-    // Extract JSON object from content (handles extra text before/after)
-    const jsonMatch=content.match(/\{[\s\S]*\}/);
-    if(!jsonMatch){
-      throw new Error('AI 返回格式异常（前100字符）：'+content.slice(0,100));
+    const result=parseAIResponse(content);
+    if(result){
+      showAIOverlay(false);
+      showAIStatus('AI 已识别，请确认后保存','success');
+      return result;
     }
-
-    let result;
-    try{
-      result=JSON.parse(jsonMatch[0]);
-    }catch(e2){
-      // Fallback: try to extract useful info from text response
-      const fallback=extractFromText(content);
-      if(fallback){
-        showAIOverlay(false);
-        showAIStatus('AI 已识别（文本模式），请确认后保存','success');
-        return fallback;
-      }
-      throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
-    }
-
-    showAIOverlay(false);
-    showAIStatus('AI 已识别，请确认后保存','success');
-    return result;
-
+    throw new Error('无法从AI回复中提取信息');
   }catch(e){
     showAIOverlay(false);
-    showAIStatus('AI 识别失败：'+e.message+'。可手动填写，或检查 AI 设置。','error');
+    showAIStatus('AI 识别失败：'+e.message,'error');
     return null;
   }
 }
 
-// ===== Fallback: extract info from text response =====
-function extractFromText(text){
-  if(!text||!text.trim())return null;
-  // Try to find JSON embedded in text
-  const m=text.match(/\{[\s\S]*\}/);
-  if(m){
-    try{return JSON.parse(m[0])}catch(e){}
-  }
-  // Build a minimal result from text
-  const result={
-    subject:'',
-    reason:'',
-    carelessAction:'',
-    knowledgePoint:'',
-    question:text.slice(0,500),
-    answer:'',
-    plan:''
-  };
-  // Detect subject
-  if(/数学|计算|加减乘除|分数|小数|几何|面积|体积/.test(text))result.subject='数学';
-  else if(/语文|阅读|作文|词语|拼音|汉字/.test(text))result.subject='语文';
-  else if(/英语|单词|语法|拼写|过去式/.test(text))result.subject='英语';
-  // Detect error reasons
-  if(/计算错误|算错|进位/.test(text))result.reason='计算错误';
-  else if(/读题|审题|没看清/.test(text))result.reason='读题不完整';
-  else if(/粗心|抄错|写错/.test(text))result.reason='具体动作粗心';
-  else if(/拼写/.test(text))result.reason='拼写错误';
-  else result.reason='知识点不会';
-  // Only return if we found a subject
-  if(!result.subject)return null;
-  return result;
-}
-
-// ===== AI Text Analysis (for text-only models like DeepSeek) =====
 async function analyzeText(text){
   const cfg=loadAIConfig();
   if(!cfg.endpoint){
@@ -1337,84 +1365,57 @@ async function analyzeText(text){
   showAIOverlay(true,'AI 分析中...');
   showAIStatus('AI 分析中...','loading');
 
-  const prompt=buildAnalysisPrompt(cfg.prompt)+'\n\n以下是家长手动输入的题目和作答内容（非图片），请据此分析：\n\n'+text;
+  const prompt=buildTextPrompt(text)+(cfg.prompt?'\n\n'+cfg.prompt:'');
 
   const body={
     model:cfg.model||'deepseek-flash',
     messages:[
-      {role:'system',content:'你是一个JSON生成器。用户会给你题目和作答信息，你必须直接输出JSON对象，不要输出任何思考过程、解释、markdown或其他文字。第一个字符必须是{。'},
+      {role:'system',content:'你是小学教育助手。请用中文描述题目内容和错误分析。'},
       {role:'user',content:prompt}
     ],
-    temperature:0.1,
-    max_tokens:800,
-    response_format:{type:'json_object'}
+    temperature:0.3,
+    max_tokens:600
   };
 
   try{
     const headers={'Content-Type':'application/json'};
     if(cfg.apiKey)headers['Authorization']='Bearer '+cfg.apiKey;
 
-    const res=await fetch(cfg.endpoint,{
-      method:'POST',
-      headers,
-      body:JSON.stringify(body)
-    });
+    const res=await fetch(cfg.endpoint,{method:'POST',headers,body:JSON.stringify(body)});
 
     if(!res.ok){
       const errText=await res.text().catch(()=>'');
       throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,300):''));
     }
 
+    const rawText=await res.text();
     let data;
-    try{
-      const rawText=await res.text();
-      data=JSON.parse(rawText);
-    }catch(jsonErr){
-      throw new Error('API返回格式异常。错误：'+jsonErr.message);
-    }
+    try{data=JSON.parse(rawText)}catch(e){throw new Error('API返回格式异常')}
+
     let content='';
     if(data.choices&&data.choices[0]){
       const msg=data.choices[0].message;
       content=msg.content||msg.reasoning_content||'';
     }else if(data.error){
-      throw new Error('API错误：'+(data.error.message||data.error.type||JSON.stringify(data.error)).slice(0,200));
-    }else if(data.content){
-      content=data.content;
-    }else if(data.message){
-      content=data.message;
+      throw new Error('API错误：'+(data.error.message||JSON.stringify(data.error)).slice(0,200));
     }else{
       content=JSON.stringify(data);
     }
 
     if(!content||!content.trim()){
-      throw new Error('AI 返回了空内容。模型"'+(cfg.model||'')+'"可能不支持，请检查模型名称');
+      throw new Error('AI 返回空内容');
     }
 
-    content=content.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
-    const jsonMatch=content.match(/\{[\s\S]*\}/);
-    if(!jsonMatch){
-      throw new Error('AI 返回格式异常（前100字符）：'+content.slice(0,100));
+    const result=parseAIResponse(content);
+    if(result){
+      showAIOverlay(false);
+      showAIStatus('AI 已分析，请确认后保存','success');
+      return result;
     }
-    let result;
-    try{
-      result=JSON.parse(jsonMatch[0]);
-    }catch(e2){
-      const fallback=extractFromText(content);
-      if(fallback){
-        showAIOverlay(false);
-        showAIStatus('AI 已分析（文本模式），请确认后保存','success');
-        return fallback;
-      }
-      throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
-    }
-
-    showAIOverlay(false);
-    showAIStatus('AI 已分析，请确认后保存','success');
-    return result;
-
+    throw new Error('无法从AI回复中提取信息');
   }catch(e){
     showAIOverlay(false);
-    showAIStatus('AI 分析失败：'+e.message+'。可手动填写，或检查 AI 设置。','error');
+    showAIStatus('AI 分析失败：'+e.message,'error');
     return null;
   }
 }
