@@ -1169,28 +1169,25 @@ function compressImage(base64Data,maxDim,quality){
 
 // ===== AI Image Analysis =====
 function buildAnalysisPrompt(extraPrompt){
-  let prompt=`你是一个专业的小学教育分析助手，专门分析小学生的错题照片。请仔细识别照片中的题目内容、学生的作答和错误，返回JSON格式的分析结果。
+  let prompt=`分析这张错题照片，直接输出JSON，禁止输出任何其他文字、解释、思考过程。
 
-分析要求：
-1. subject: 学科，只能是"数学"、"语文"或"英语"之一
-2. reason: 错因，必须从以下列表中选择最匹配的一个：
-   数学选项: 读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
-   语文选项: 字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
-   英语选项: 单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
-3. carelessAction: 如果错因是"具体动作粗心"，必须填写具体的粗心动作描述（如：忘记进位、抄错数字、看错运算符号）。其他错因留空字符串。
-4. knowledgePoint: 这道题考查的知识点（简洁描述，如：三位数乘两位数、近义词辨析、动词过去式）
-5. question: 题目原文和学生的错误作答，格式为"题目：...\\n学生作答：..."
-6. answer: 正确答案
-7. plan: 针对这个错误的改进措施建议（具体可操作，如：先独立订正，3天后做1道变式题，连续2次做对后标记为已掌握）
+字段说明：
+- subject: "数学"或"语文"或"英语"
+- reason: 错因，必须选自以下列表
+- carelessAction: 仅当错因含"粗心"时填写具体动作，否则为空字符串
+- knowledgePoint: 知识点
+- question: 题目原文和学生作答
+- answer: 正确答案
+- plan: 改进措施
 
-注意：
-- "粗心"不能直接作为最终分析结论，必须记录具体动作
-- 如果照片不清晰或无法识别，仍然返回最合理的推测
-- 只返回JSON，不要其他文字
+数学错因: 读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
+语文错因: 字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
+英语错因: 单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
 
-返回格式：{"subject":"数学","reason":"计算错误","carelessAction":"","knowledgePoint":"三位数乘两位数","question":"题目：...\\n学生作答：...","answer":"4140","plan":"..."}`;
+输出示例（直接输出这个格式的JSON，不要任何其他内容）：
+{"subject":"数学","reason":"计算错误","carelessAction":"","knowledgePoint":"三位数乘两位数","question":"题目：345×12=？\\n学生作答：4140","answer":"4140","plan":"先独立订正，3天后做变式题"}`;
   if(extraPrompt&&extraPrompt.trim()){
-    prompt+='\n\n额外要求：'+extraPrompt.trim();
+    prompt+='\n\n'+extraPrompt.trim();
   }
   return prompt;
 }
@@ -1213,14 +1210,15 @@ async function analyzeImage(base64Image){
   const body={
     model:cfg.model||'gpt-4o',
     messages:[
-      {role:'system',content:'你是小学教育分析助手，分析错题照片并返回JSON格式的结构化数据。只返回JSON，不要markdown代码块，不要其他文字。'},
+      {role:'system',content:'你是一个JSON生成器。用户会给你一张错题照片和分析要求，你必须直接输出JSON对象，不要输出任何思考过程、解释、markdown或其他文字。第一个字符必须是{。'},
       {role:'user',content:[
         {type:'text',text:prompt},
         {type:'image_url',image_url:{url:compressedImage}}
       ]}
     ],
-    temperature:0.3,
-    max_tokens:1000
+    temperature:0.1,
+    max_tokens:800,
+    response_format:{type:'json_object'}
   };
 
   try{
@@ -1304,13 +1302,14 @@ async function analyzeText(text){
   const prompt=buildAnalysisPrompt(cfg.prompt)+'\n\n以下是家长手动输入的题目和作答内容（非图片），请据此分析：\n\n'+text;
 
   const body={
-    model:cfg.model||'deepseek-chat',
+    model:cfg.model||'deepseek-flash',
     messages:[
-      {role:'system',content:'你是小学教育分析助手，根据提供的题目和作答信息进行分析并返回JSON格式的结构化数据。只返回JSON，不要markdown代码块，不要其他文字。'},
+      {role:'system',content:'你是一个JSON生成器。用户会给你题目和作答信息，你必须直接输出JSON对象，不要输出任何思考过程、解释、markdown或其他文字。第一个字符必须是{。'},
       {role:'user',content:prompt}
     ],
-    temperature:0.3,
-    max_tokens:1000
+    temperature:0.1,
+    max_tokens:800,
+    response_format:{type:'json_object'}
   };
 
   try{
