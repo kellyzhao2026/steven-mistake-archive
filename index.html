@@ -506,7 +506,7 @@ const AI_PRESETS = {
   openai: {endpoint:'https://api.openai.com/v1/chat/completions',model:'gpt-4o',apiKey:''},
   qwen: {endpoint:'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',model:'qwen-vl-max',apiKey:''},
   doubao: {endpoint:'https://ark.cn-beijing.volces.com/api/v3/chat/completions',model:'doubao-vision-pro-32k',apiKey:''},
-  deepseek: {endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-v4-flash-vision-exp',apiKey:'sk-a56e6ab1482747908720836bdc4a41e4'},
+  deepseek: {endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-flash',apiKey:'sk-a56e6ab1482747908720836bdc4a41e4'},
   custom: {endpoint:'',model:'',apiKey:''}
 };
 const SUBJECT_COLORS = { '数学':'#2864ff', '语文':'#d9800c', '英语':'#6b3fd4' };
@@ -1045,7 +1045,7 @@ function openRecordModal(){
 
 function isVisionModel(model){
   const m=(model||'').toLowerCase();
-  const visionKeywords=['gpt-4o','gpt-4-turbo','gpt-4-vision','gpt-4o-mini','vl','vision','vl-max','qwen-vl','doubao-vision','gemini','claude','flash-vision'];
+  const visionKeywords=['gpt-4o','gpt-4-turbo','gpt-4-vision','gpt-4o-mini','vl','vision','vl-max','qwen-vl','doubao-vision','gemini','claude','flash-vision','deepseek-flash'];
   return visionKeywords.some(k=>m.includes(k));
 }
 
@@ -1235,14 +1235,22 @@ async function analyzeImage(base64Image){
 
     if(!res.ok){
       const errText=await res.text().catch(()=>'');
-      throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,200):''));
+      throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,300):''));
     }
 
-    const data=await res.json();
+    let data;
+    try{
+      const rawText=await res.text();
+      data=JSON.parse(rawText);
+    }catch(jsonErr){
+      throw new Error('API返回格式异常（模型可能不存在）。错误：'+jsonErr.message);
+    }
     let content='';
     if(data.choices&&data.choices[0]){
       const msg=data.choices[0].message;
       content=msg.content||msg.reasoning_content||'';
+    }else if(data.error){
+      throw new Error('API错误：'+(data.error.message||data.error.type||JSON.stringify(data.error)).slice(0,200));
     }else if(data.content){
       content=data.content;
     }else if(data.message){
@@ -1252,7 +1260,7 @@ async function analyzeImage(base64Image){
     }
 
     if(!content||!content.trim()){
-      throw new Error('AI 返回了空内容，请检查模型名称是否正确');
+      throw new Error('AI 返回了空内容。模型"'+(cfg.model||'')+'"可能不支持图片输入，请换用通义千问 VL 或 GPT-4o');
     }
 
     // Strip markdown code fences if present
@@ -1261,10 +1269,15 @@ async function analyzeImage(base64Image){
     // Extract JSON object from content (handles extra text before/after)
     const jsonMatch=content.match(/\{[\s\S]*\}/);
     if(!jsonMatch){
-      throw new Error('AI 返回格式异常：'+content.slice(0,100));
+      throw new Error('AI 返回格式异常（前100字符）：'+content.slice(0,100));
     }
 
-    const result=JSON.parse(jsonMatch[0]);
+    let result;
+    try{
+      result=JSON.parse(jsonMatch[0]);
+    }catch(e2){
+      throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
+    }
 
     showAIOverlay(false);
     showAIStatus('AI 已识别，请确认后保存','success');
@@ -1312,14 +1325,22 @@ async function analyzeText(text){
 
     if(!res.ok){
       const errText=await res.text().catch(()=>'');
-      throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,200):''));
+      throw new Error('HTTP '+res.status+(errText?'：'+errText.slice(0,300):''));
     }
 
-    const data=await res.json();
+    let data;
+    try{
+      const rawText=await res.text();
+      data=JSON.parse(rawText);
+    }catch(jsonErr){
+      throw new Error('API返回格式异常。错误：'+jsonErr.message);
+    }
     let content='';
     if(data.choices&&data.choices[0]){
       const msg=data.choices[0].message;
       content=msg.content||msg.reasoning_content||'';
+    }else if(data.error){
+      throw new Error('API错误：'+(data.error.message||data.error.type||JSON.stringify(data.error)).slice(0,200));
     }else if(data.content){
       content=data.content;
     }else if(data.message){
@@ -1329,15 +1350,20 @@ async function analyzeText(text){
     }
 
     if(!content||!content.trim()){
-      throw new Error('AI 返回了空内容，请检查模型名称是否正确');
+      throw new Error('AI 返回了空内容。模型"'+(cfg.model||'')+'"可能不支持，请检查模型名称');
     }
 
     content=content.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
     const jsonMatch=content.match(/\{[\s\S]*\}/);
     if(!jsonMatch){
-      throw new Error('AI 返回格式异常：'+content.slice(0,100));
+      throw new Error('AI 返回格式异常（前100字符）：'+content.slice(0,100));
     }
-    const result=JSON.parse(jsonMatch[0]);
+    let result;
+    try{
+      result=JSON.parse(jsonMatch[0]);
+    }catch(e2){
+      throw new Error('JSON解析失败。AI返回内容（前200字符）：'+content.slice(0,200));
+    }
 
     showAIOverlay(false);
     showAIStatus('AI 已分析，请确认后保存','success');
@@ -1787,10 +1813,13 @@ document.addEventListener('touchmove',e=>{
 },{passive:false});
 
 // ===== Init =====
-// Auto-configure DeepSeek vision if no AI config, or upgrade from old deepseek-chat
+// Auto-configure DeepSeek vision: upgrade from old model names
 {
   const stored=loadAIConfig();
-  if(!stored.endpoint||stored.model==='deepseek-chat'){
+  const needsUpgrade=!stored.endpoint
+    ||stored.model==='deepseek-chat'
+    ||stored.model==='deepseek-v4-flash-vision-exp';
+  if(needsUpgrade){
     saveAIConfig({
       endpoint:AI_PRESETS.deepseek.endpoint,
       apiKey:AI_PRESETS.deepseek.apiKey,
