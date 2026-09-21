@@ -531,7 +531,9 @@ function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2
 // ===== Persistence (Supabase) =====
 const SUPABASE_URL='https://mfrbcvakpuiwiqguyjxz.supabase.co';
 const SUPABASE_KEY='sb_publishable_zb5wRXu0dDQL_Sn2CDoCkw_MOYcrWSj';
-const sbClient=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+const sbClient=supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{
+  auth:{persistSession:true,autoRefreshToken:true,storage:localStorage}
+});
 
 function toDB(r,uid){
   return{id:r.id,user_id:uid,image:r.image||'',subject:r.subject,reason:r.reason,careless_action:r.carelessAction||'',knowledge_point:r.knowledgePoint||'',question:r.question||'',answer:r.answer||'',plan:r.plan||'',status:r.status,review_history:r.reviewHistory||[],review_interval_idx:r.reviewIntervalIdx||0,next_review_date:r.nextReviewDate,repeats:r.repeats||0,created_at:r.createdAt};
@@ -2027,16 +2029,57 @@ document.addEventListener('touchmove',e=>{
 }
 
 // Auth: check session on load, set up state change listener
+let authDebounceTimer=null;
+let isLoggedIn=false;
 sbClient.auth.onAuthStateChange(async(event,session)=>{
+  if(event==='INITIAL_SESSION'){
+    // First check — if session is null, show login
+    if(session){
+      isLoggedIn=true;
+      hideLoginScreen();
+      await loadData();
+      updateReasonOptions();
+      renderTab();
+    }else{
+      isLoggedIn=false;
+      showLoginScreen();
+      renderTab();
+    }
+    return;
+  }
+
   if(session){
+    // Got a session — clear any pending logout and proceed
+    if(authDebounceTimer){clearTimeout(authDebounceTimer);authDebounceTimer=null}
+    isLoggedIn=true;
     hideLoginScreen();
-    const ok=await loadData();
+    await loadData();
     updateReasonOptions();
     renderTab();
   }else{
-    state.records=[];
-    showLoginScreen();
-    renderTab();
+    // Session lost — debounce before showing login (handles transient token refreshes)
+    // But if it's a SIGNED_OUT event from explicit logout, act immediately
+    if(event==='SIGNED_OUT'){
+      isLoggedIn=false;
+      state.records=[];
+      showLoginScreen();
+      renderTab();
+      return;
+    }
+    if(authDebounceTimer)clearTimeout(authDebounceTimer);
+    authDebounceTimer=setTimeout(async()=>{
+      // Double-check: try to refresh the session
+      const{data:{session:sess2}}=await sbClient.auth.getSession();
+      if(sess2){
+        // Session recovered
+        authDebounceTimer=null;
+        return;
+      }
+      isLoggedIn=false;
+      state.records=[];
+      showLoginScreen();
+      renderTab();
+    },3000);
   }
 });
 
@@ -2044,14 +2087,29 @@ sbClient.auth.onAuthStateChange(async(event,session)=>{
 (async()=>{
   const{data:{session}}=await sbClient.auth.getSession();
   if(session){
+    isLoggedIn=true;
     hideLoginScreen();
     await loadData();
   }else{
+    isLoggedIn=false;
     showLoginScreen();
   }
   updateReasonOptions();
   renderTab();
 })();
+
+// Re-check session when page becomes visible again (after camera/file picker)
+document.addEventListener('visibilitychange',async()=>{
+  if(document.visibilityState==='visible'&&isLoggedIn){
+    const{data:{session}}=await sbClient.auth.getSession();
+    if(session){
+      // Session still valid, nothing to do
+    }else{
+      // Session lost — try to recover, then show login if failed
+      showLoginScreen();
+    }
+  }
+});
 </script>
 </body>
 </html>
