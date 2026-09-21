@@ -541,12 +541,22 @@ function fromDB(row){
 }
 
 async function loadData(){
-  const{data:{user}}=await sbClient.auth.getUser();
-  if(!user){state.records=[];return}
-  const{data,error}=await sbClient.from('mistakes').select('*').eq('user_id',user.id);
-  if(error){console.error('Load error:',error);state.records=[];return}
-  state.records=data.map(fromDB);
-  if(state.records.length===0)state.records=getDemoData().map(r=>({...r}));
+  try{
+    const{data:{user}}=await sbClient.auth.getUser();
+    if(!user){state.records=[];return false}
+    const{data,error}=await sbClient.from('mistakes').select('*').eq('user_id',user.id).order('created_at',{ascending:false});
+    if(error){console.error('Load error:',error);state.records=[];return false}
+    state.records=data.map(fromDB);
+    // Only show demo data if user has zero records AND has never saved anything
+    if(state.records.length===0&&!localStorage.getItem('steven-has-data')){
+      state.records=getDemoData().map(r=>({...r}));
+    }
+    return true;
+  }catch(e){
+    console.error('loadData exception:',e);
+    state.records=[];
+    return false;
+  }
 }
 
 async function saveMistake(record){
@@ -595,6 +605,11 @@ async function handleAuth(){
     if(isLoginMode){
       const{data,error}=await sbClient.auth.signInWithPassword({email,password});
       if(error)throw error;
+      // Explicitly load data after login (in addition to onAuthStateChange)
+      const ok=await loadData();
+      hideLoginScreen();
+      updateReasonOptions();
+      renderTab();
     }else{
       const{data,error}=await sbClient.auth.signUp({email,password});
       if(error)throw error;
@@ -605,6 +620,13 @@ async function handleAuth(){
         $('#loginToggleText').innerHTML='还没有账号？<a id="loginToggle">立即注册</a>';
         setLoginLoading(false);
         return;
+      }
+      // Auto sign-in after successful signup with session
+      if(data.session){
+        await loadData();
+        hideLoginScreen();
+        updateReasonOptions();
+        renderTab();
       }
     }
   }catch(e){
@@ -1107,6 +1129,7 @@ function saveRecord(){
 
   state.records.unshift(record);
   checkRepeatErrors(record);
+  localStorage.setItem('steven-has-data','1');
   saveMistake(record);
   $('#recordModal').classList.remove('show');
   renderTab();
@@ -1874,14 +1897,14 @@ document.addEventListener('touchmove',e=>{
 }
 
 // Auth: check session on load, set up state change listener
-sbClient.auth.onAuthStateChange((event,session)=>{
+sbClient.auth.onAuthStateChange(async(event,session)=>{
   if(session){
     hideLoginScreen();
-    loadData().then(()=>{
-      updateReasonOptions();
-      renderTab();
-    });
+    const ok=await loadData();
+    updateReasonOptions();
+    renderTab();
   }else{
+    state.records=[];
     showLoginScreen();
     renderTab();
   }
