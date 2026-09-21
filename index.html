@@ -1169,23 +1169,21 @@ function compressImage(base64Data,maxDim,quality){
 
 // ===== AI Image Analysis =====
 function buildAnalysisPrompt(extraPrompt){
-  let prompt=`分析这张错题照片，直接输出JSON，禁止输出任何其他文字、解释、思考过程。
+  let prompt=`看照片，输出JSON。只填以下字段，不要推理过程，不要解释。
 
-字段说明：
-- subject: "数学"或"语文"或"英语"
-- reason: 错因，必须选自以下列表
-- carelessAction: 仅当错因含"粗心"时填写具体动作，否则为空字符串
-- knowledgePoint: 知识点
-- question: 题目原文和学生作答
-- answer: 正确答案
-- plan: 改进措施
+subject: "数学"或"语文"或"英语"
+reason: 从对应学科列表中选一个
+carelessAction: 仅"粗心"类错因填具体动作，否则空
+knowledgePoint: 知识点（5-10个字）
+question: 题目原文+学生作答（简洁，不要分析过程）
+answer: 正确答案
+plan: 一句话改进措施
 
-数学错因: 读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
-语文错因: 字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
-英语错因: 单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
+数学: 读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
+语文: 字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
+英语: 单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
 
-输出示例（直接输出这个格式的JSON，不要任何其他内容）：
-{"subject":"数学","reason":"计算错误","carelessAction":"","knowledgePoint":"三位数乘两位数","question":"题目：345×12=？\\n学生作答：4140","answer":"4140","plan":"先独立订正，3天后做变式题"}`;
+{"subject":"数学","reason":"计算错误","carelessAction":"","knowledgePoint":"三位数乘两位数","question":"题目：345×12=？ 学生作答：4140","answer":"4140","plan":"先订正，3天后做变式题"}`;
   if(extraPrompt&&extraPrompt.trim()){
     prompt+='\n\n'+extraPrompt.trim();
   }
