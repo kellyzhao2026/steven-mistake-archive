@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="manifest.json">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <title>Steven 错题档案 · 正式版</title>
 <style>
 :root{
@@ -506,7 +507,7 @@ const AI_PRESETS = {
   openai: {endpoint:'https://api.openai.com/v1/chat/completions',model:'gpt-4o',apiKey:''},
   qwen: {endpoint:'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',model:'qwen-vl-max',apiKey:''},
   doubao: {endpoint:'https://ark.cn-beijing.volces.com/api/v3/chat/completions',model:'doubao-vision-pro-32k',apiKey:''},
-  deepseek: {endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-flash',apiKey:'sk-a56e6ab1482747908720836bdc4a41e4'},
+  deepseek: {endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',apiKey:''},
   custom: {endpoint:'',model:'',apiKey:''}
 };
 const SUBJECT_COLORS = { '数学':'#2864ff', '语文':'#d9800c', '英语':'#6b3fd4' };
@@ -515,6 +516,7 @@ const SUBJECT_BG = { '数学':'var(--blue-bg)', '语文':'var(--orange-bg)', '�
 // ===== State =====
 let state = { records: [], role: 'parent', tab: 'overview', filter: 'all', profileRange: '30' };
 let pendingImage = '';
+let pendingVariation = '';
 
 // ===== Utils =====
 const $ = s => document.querySelector(s);
@@ -536,10 +538,10 @@ const sbClient=supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{
 });
 
 function toDB(r,uid){
-  return{id:r.id,user_id:uid,image:r.image||'',subject:r.subject,reason:r.reason,careless_action:r.carelessAction||'',knowledge_point:r.knowledgePoint||'',question:r.question||'',answer:r.answer||'',plan:r.plan||'',status:r.status,review_history:r.reviewHistory||[],review_interval_idx:r.reviewIntervalIdx||0,next_review_date:r.nextReviewDate,repeats:r.repeats||0,created_at:r.createdAt};
+  return{id:r.id,user_id:uid,image:r.image||'',subject:r.subject,reason:r.reason,careless_action:r.carelessAction||'',knowledge_point:r.knowledgePoint||'',question:r.question||'',answer:r.answer||'',plan:r.plan||'',variation:r.variation||'',status:r.status,review_history:r.reviewHistory||[],review_interval_idx:r.reviewIntervalIdx||0,next_review_date:r.nextReviewDate,repeats:r.repeats||0,created_at:r.createdAt};
 }
 function fromDB(row){
-  return{id:row.id,image:row.image||'',subject:row.subject,reason:row.reason,carelessAction:row.careless_action||'',knowledgePoint:row.knowledge_point||'',question:row.question||'',answer:row.answer||'',plan:row.plan||'',status:row.status,reviewHistory:row.review_history||[],reviewIntervalIdx:row.review_interval_idx||0,nextReviewDate:row.next_review_date,repeats:row.repeats||0,createdAt:row.created_at};
+  return{id:row.id,image:row.image||'',subject:row.subject,reason:row.reason,carelessAction:row.careless_action||'',knowledgePoint:row.knowledge_point||'',question:row.question||'',answer:row.answer||'',plan:row.plan||'',variation:row.variation||'',status:row.status,reviewHistory:row.review_history||[],reviewIntervalIdx:row.review_interval_idx||0,nextReviewDate:row.next_review_date,repeats:row.repeats||0,createdAt:row.created_at};
 }
 
 const CACHE_KEY='steven-cache';
@@ -948,6 +950,8 @@ function renderProfile(){
     return;
   }
 
+  html+=renderWeeklyReport();
+
   // 1. Subject distribution
   const subjectCounts={'数学':0,'语文':0,'英语':0};
   records.forEach(r=>{if(subjectCounts[r.subject]!==undefined)subjectCounts[r.subject]++});
@@ -1013,6 +1017,20 @@ function renderProfile(){
 
   html+='</div>';
   $('#tab-profile').innerHTML=html;
+}
+
+function renderWeeklyReport(){
+  const cutoff=addDays(today(),-6);
+  const weekly=state.records.filter(r=>new Date(r.createdAt)>=cutoff);
+  const reviews=state.records.flatMap(r=>(r.reviewHistory||[]).filter(v=>new Date(v.date)>=cutoff));
+  const correct=reviews.filter(v=>v.correct).length;
+  const reasons={};
+  weekly.forEach(r=>{const key=r.knowledgePoint||r.reason;reasons[key]=(reasons[key]||0)+1});
+  const top=Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,3);
+  const focus=top.length?top.map(([k,v])=>`${esc(k)}（${v}题）`).join('、'):'本周暂无新增错题';
+  return `<div class="chart-container" style="background:#f8faff;border-radius:12px;padding:14px"><div class="chart-title">本周周报</div>
+    <div style="font-size:14px;line-height:1.9">新增错题：<strong>${weekly.length}</strong> 题<br>完成复测：<strong>${reviews.length}</strong> 次，正确率：<strong>${reviews.length?Math.round(correct/reviews.length*100):0}%</strong><br>易错题型：${focus}<br>下周重点：${top.length?'优先完成“'+esc(top[0][0])+'”的变式题并按期复测。':'继续记录错题，积累后生成针对性建议。'}</div>
+  </div>`;
 }
 
 function setProfileRange(r){state.profileRange=String(r);renderProfile()}
@@ -1091,6 +1109,7 @@ function generateSuggestion(records,subjectCounts,topReasons,masteryCounts){
 // ===== Record Modal =====
 function openRecordModal(){
   pendingImage='';
+  pendingVariation='';
   $('#photoInput').value='';
   $('#imgPreviewBox').style.display='none';
   showAIStatus('','idle');
@@ -1161,6 +1180,7 @@ function saveRecord(){
     question:$('#fQuestion').value.trim(),
     answer:$('#fAnswer').value.trim(),
     plan,
+    variation:pendingVariation,
     status:'未掌握',
     reviewHistory:[],
     reviewIntervalIdx:0,
@@ -1242,49 +1262,31 @@ const ENGLISH_REASONS=['单词不会','拼写错误','词义混淆','语法不�
 const ALL_REASONS=[...MATH_REASONS,...CHINESE_REASONS,...ENGLISH_REASONS];
 
 function buildImagePrompt(){
-  return `你是小学错题分析专家。请仔细看这张错题照片，按以下格式输出分析结果。每个字段占一行，前面是标签，后面是内容。
+  return `你是小学错题识别助手。只依据图片中清晰可见的内容识别，不补写、不扩展、不推测。无法确认的字段填空字符串。只输出一个JSON对象，不要Markdown，不要解释。
 
-【输出格式】
-学科：数学
-题目：完整的题目原文（简洁，不要多余描述）
-学生作答：只写学生的最终答案，不要推测过程
-正确答案：最终答案
-解答过程：正确的解题步骤
-错因：从下面的列表中选一个最匹配的
-粗心具体动作：如果错因是"具体动作粗心"，填具体动作；否则填"无"
-知识点：知识点和所属年级，格式如：四年级上册-三位数乘两位数
-改进措施：给出针对性的改进建议（2句话）
+输出字段：
+{"subject":"数学/语文/英语","question":"仅题目原文","studentAnswer":"仅图片中实际作答","answer":"仅正确答案，不写解题过程","reason":"仅一个错因","carelessAction":"仅可见的具体动作，否则为空","knowledgePoint":"一个准确、简短的知识点，不确定则为空","plan":"一个可执行动作，不超过35字","variation":"一道同知识点、不同数字或语境的完整复测题，不含答案"}
 
 【数学错因列表】读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
 【语文错因列表】字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
 【英语错因列表】单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
 
-请严格按上面的格式输出，标签名不要改，每行一个字段。每个字段简洁明了。`;
+题目、学生作答、正确答案必须互相分开。不要输出分析过程、依据、评价、提示语或额外信息。`;
 }
 
 function buildTextPrompt(text){
-  return `你是小学错题分析专家。以下是家长输入的一道错题：
+  return `你是小学错题识别助手。只依据家长提供的文字提取信息，不补写、不扩展、不推测。无法确认的字段填空字符串。只输出一个JSON对象，不要Markdown，不要解释。
 
 ${text}
 
-请按以下格式输出分析结果。每个字段占一行，前面是标签，后面是内容。
-
-【输出格式】
-学科：数学
-题目：完整的题目原文（简洁，不要多余描述）
-学生作答：只写学生的最终答案，不要推测过程
-正确答案：最终答案
-解答过程：正确的解题步骤
-错因：从下面的列表中选一个最匹配的
-粗心具体动作：如果错因是"具体动作粗心"，填具体动作；否则填"无"
-知识点：知识点和所属年级，格式如：四年级上册-三位数乘两位数
-改进措施：给出针对性的改进建议（2句话）
+输出字段：
+{"subject":"数学/语文/英语","question":"仅题目原文","studentAnswer":"仅实际作答","answer":"仅正确答案，不写解题过程","reason":"仅一个错因","carelessAction":"具体动作，否则为空","knowledgePoint":"一个准确、简短的知识点，不确定则为空","plan":"一个可执行动作，不超过35字","variation":"一道同知识点、不同数字或语境的完整复测题，不含答案"}
 
 【数学错因列表】读题不完整、数量关系没找出、知识点不会、方法不会、计算错误、单位/格式错误、检查不到位、具体动作粗心
 【语文错因列表】字音字形、词语理解、病句标点、段落概括、阅读理解、信息提取、人物情感分析、作文审题、作文结构、表达不完整
 【英语错因列表】单词不会、拼写错误、词义混淆、语法不会、句型不会、听写错误、阅读理解、书写格式、审题错误
 
-请严格按上面的格式输出，标签名不要改，每行一个字段。每个字段简洁明了。`;
+题目、学生作答、正确答案必须互相分开。不要输出分析过程、依据、评价、提示语或额外信息。`;
 }
 
 // Parse AI response by label lines (stable format)
@@ -1337,15 +1339,9 @@ function parseAIResponse(text){
 
   let question=get('题目');
   const stuAns=get('学生作答');
-  if(stuAns&&stuAns!=='无'&&!question.includes(stuAns)){
-    question+='\n学生作答：'+stuAns;
-  }
+  if(stuAns&&stuAns!=='无')question+='\n学生作答：'+stuAns;
 
   let answer=get('正确答案');
-  const solution=get('解答过程');
-  if(solution&&solution!=='无'){
-    answer=answer+'\n\n解答过程：\n'+solution;
-  }
 
   let knowledgePoint=get('知识点');
   if(!knowledgePoint){
@@ -1403,12 +1399,9 @@ function parseAIResponse(text){
       if(new RegExp(pattern).test(text)){knowledgePoint=kp;break}
     }
   }
-  if(!knowledgePoint&&subject){
-    knowledgePoint=subject+'·待确认';
-  }
-
   let plan=get('改进措施');
-  if(!plan)plan='先独立订正，3天后做变式题巩固。';
+  if(!plan)plan='完成1道同知识点变式题，3天后复测。';
+  const variation=get('变式题');
 
   let carelessAction=get('粗心具体动作');
   if(carelessAction==='无'||!reason.includes('粗心'))carelessAction='';
@@ -1422,7 +1415,8 @@ function parseAIResponse(text){
     knowledgePoint:knowledgePoint.slice(0,50),
     question:question.slice(0,500),
     answer:answer.slice(0,500),
-    plan:plan.slice(0,200)
+    plan:plan.slice(0,80),
+    variation:variation.slice(0,500)
   };
 }
 
@@ -1433,9 +1427,10 @@ function normalizeAIResult(obj){
     reason:obj.reason||obj.错因||'',
     carelessAction:obj.carelessAction||obj.careless_action||obj.粗心具体动作||'',
     knowledgePoint:obj.knowledgePoint||obj.knowledge_point||obj.知识点||'',
-    question:obj.question||obj.题目||'',
+    question:(obj.question||obj.题目||'')+((obj.studentAnswer||obj.student_answer||obj.学生作答)?'\n学生作答：'+(obj.studentAnswer||obj.student_answer||obj.学生作答):''),
     answer:obj.answer||obj.正确答案||'',
-    plan:obj.plan||obj.改进措施||''
+    plan:obj.plan||obj.改进措施||'',
+    variation:obj.variation||obj.变式题||''
   };
 }
 
@@ -1640,6 +1635,7 @@ function autoFillForm(result){
     $('#fPlan').value=result.plan;
     markAIFilled($('#fPlan').closest('.field'));
   }
+  pendingVariation=(result.variation||'').trim();
 }
 
 function markAIFilled(fieldEl){
@@ -1730,6 +1726,7 @@ function completeReview(id,correct){
 }
 
 function generateVariation(r){
+  if(r.variation)return r.variation;
   const sub=r.subject;
   const kp=r.knowledgePoint||r.reason;
   if(sub==='数学'){
@@ -1843,12 +1840,29 @@ function calcStreak(){
 
 // ===== Export =====
 function exportData(){
-  const data={exportDate:fmtDate(today()),child:'Steven',grade:'四年级',records:state.records};
-  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='Steven-错题档案-'+fmtDate(today())+'.json';
-  a.click();
+  if(typeof XLSX==='undefined'){alert('Excel组件加载失败，请联网刷新页面后重试。');return}
+  const rows=state.records.map((r,i)=>{
+    const parts=(r.question||'').split(/\n学生作答[：:]/);
+    return{
+      '序号':i+1,
+      '记录日期':r.createdAt||'',
+      '学科':r.subject||'',
+      '知识点':r.knowledgePoint||'',
+      '题目':parts[0]||'',
+      'Steven作答':parts[1]||'',
+      '错因':r.reason||'',
+      '具体错误动作':r.carelessAction||'',
+      '掌握状态':r.status||'',
+      '下次复测':r.nextReviewDate||''
+    };
+  });
+  if(!rows.length){alert('暂无错题可导出。');return}
+  const ws=XLSX.utils.json_to_sheet(rows);
+  ws['!cols']=[{wch:7},{wch:13},{wch:9},{wch:24},{wch:48},{wch:24},{wch:18},{wch:28},{wch:12},{wch:13}];
+  ws['!autofilter']={ref:`A1:J${rows.length+1}`};
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'错题列表');
+  XLSX.writeFile(wb,'Steven-错题列表-'+fmtDate(today())+'.xlsx');
 }
 
 // ===== Event Bindings =====
